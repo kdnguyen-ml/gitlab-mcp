@@ -133,3 +133,75 @@ To replay a request, the wrapper needs the original request body. Two body types
 | `FormData` | Multipart file upload | ❌ No — already consumed |
 
 When the body is non-replayable, the wrapper gives up and returns the 401 to the caller. File upload endpoints are the main case where this matters.
+
+---
+
+## Tool Filtering
+
+The server exposes a large number of GitLab tools, grouped into **toolsets**. You control which tools are active via environment variables — useful for narrowing the tool list to only what your use case needs.
+
+### Filtering pipeline (in order)
+
+Defined in `index.ts:589-638`. Each step narrows the previous result:
+
+| Step | Env Var | Behaviour |
+|---|---|---|
+| 1 | `GITLAB_TOOLSETS` | Keep only tools belonging to the listed toolset IDs. Omit → default toolsets. `all` → everything. |
+| 2 | `GITLAB_TOOLS` | Add individual named tools **on top**, bypassing the toolset filter. |
+| 3 | *(legacy flags)* | `USE_PIPELINE`, `USE_MILESTONE`, `USE_GITLAB_WIKI` add their tools additively (deprecated — prefer `GITLAB_TOOLSETS`). |
+| 4 | `GITLAB_READ_ONLY_MODE` | If `true`, strip all write tools — keep only read-only ones. |
+| 5 | `GITLAB_DENIED_TOOLS_REGEX` | Regex matched against tool names — any match is blocked. Max 200 chars; nested quantifiers rejected. |
+| 5.5 | *(always)* | `discover_tools` meta-tool is always injected (unless blocked by steps 4–5). |
+| 5.7 | `GITLAB_TOOL_POLICY_HIDDEN` | Comma-separated tool names hidden from `list_tools`. **Not enforced at call time** — a client that calls the tool by name directly will still execute it. |
+
+### Available toolset IDs
+
+Defined in `tools/registry.ts:1332`.
+
+| Toolset | Default? | Key tools |
+|---|---|---|
+| `merge_requests` | ✅ | get/list/create/update MR, diffs, notes, draft notes, threads, emoji |
+| `issues` | ✅ | get/list/create/update issue, notes, links, discussions, todos |
+| `repositories` | ✅ | search/create/fork repo, get file, push files, repo tree |
+| `branches` | ✅ | create/delete branch, commits, blame, commit status |
+| `projects` | ✅ | get/list project, members, namespaces, groups, health check |
+| `labels` | ✅ | list/get/create/update/delete label |
+| `ci` | ✅ | validate CI lint |
+| `groups` | ✅ | create group |
+| `users` | ✅ | get user, whoami, events, upload markdown |
+| `pipelines` | ❌ | list/get pipeline, jobs, artifacts, deployments, environments |
+| `milestones` | ❌ | list/get/create/edit/delete milestone, burndown |
+| `wiki` | ❌ | list/get/create/update/delete wiki pages (project + group) |
+| `releases` | ❌ | list/get/create/update/delete release, evidence, assets |
+| `tags` | ❌ | list/get/create/delete tag, tag signature |
+| `workitems` | ❌ | work items (next-gen issues): list/create/update/move/notes/emoji |
+| `webhooks` | ❌ | list webhooks and webhook events |
+| `search` | ❌ | code search (project, group, global) |
+
+### Configuration examples (docker-compose)
+
+Add to the `x-mcp-env` anchor:
+
+```yaml
+x-mcp-env: &mcp-env
+  # Minimal read-only review setup
+  GITLAB_TOOLSETS: "merge_requests,issues,repositories,branches,projects,users"
+  GITLAB_READ_ONLY_MODE: "true"
+
+  # Add individual tools on top of a toolset selection
+  GITLAB_TOOLS: "health_check,whoami"
+
+  # Block destructive tools by regex
+  GITLAB_DENIED_TOOLS_REGEX: "delete_.*"
+
+  # Hide tools from listing (also blocks them at call time)
+  GITLAB_TOOL_POLICY_HIDDEN: "delete_branch,fork_repository"
+```
+
+### Behaviour notes
+
+- If `GITLAB_TOOLSETS` is unset, the **default toolsets** are active (all ✅ rows above).
+- `GITLAB_TOOLS` is **additive** — it cannot remove tools, only add ones that the toolset filter excluded.
+- Legacy flags (`USE_PIPELINE` etc.) conflict with `GITLAB_TOOLSETS` — a warning is logged if both are set.
+- `GITLAB_TOOL_POLICY_HIDDEN` only hides tools from `list_tools` — it is **not** enforced at call time. A client that bypasses listing and calls the tool by name directly will still execute it. Use `GITLAB_DENIED_TOOLS_REGEX` or `GITLAB_READ_ONLY_MODE` if you need actual enforcement.
+- `GITLAB_DENIED_TOOLS_REGEX` is also only enforced at listing time (same as hidden) — it removes tools from `filteredTools` on server creation but has no call-time guard either. Only `GITLAB_READ_ONLY_MODE` has a true call-time check (`index.ts:8544`).
